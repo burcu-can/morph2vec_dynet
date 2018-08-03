@@ -8,8 +8,8 @@ import dynet_config
 import dynet as dy
 import numpy as np
 from numpy.linalg import norm
-from keras.preprocessing import sequence
 import argparse
+import dynet_config
 
 
 def main():
@@ -80,11 +80,6 @@ def main():
     for i in range(number_of_segmentation):
         x_train[i] = np.array(x_train[i])
 
-#    for i in range(len(x_train)):
-#        x_train[i] = sequence.pad_sequences(x_train[i], maxlen=timesteps_max_len)
-
-    #print(x_train[0][0])
-    #print(x_train[0][0][0])
     print('')
     print('==========================  Load pre-trained word vectors...  ======================================')
     print('')
@@ -117,26 +112,31 @@ def main():
     print('===================================  Build model...  ===============================================')
     print('')
 
+    #dynet_config.set(weight_decay=0.001)
+    #dynet_config.set(autobatch=10)
+
     model = dy.Model()
     parameters = dy.ParameterCollection()
 
-    morph_embeddings = model.add_lookup_parameters((len(set(morphs)), int(dim/4))) # randomly initialized
+    morph_embeddings = model.add_lookup_parameters((len(set(morphs))+1, int(dim/4))) # randomly initialized
 
     def morph_rep(m): # returns the embedding of morpheme 'm' (m: morpheme index)
         #m_index = morph_indices[m]
         return morph_embeddings[m]
 
-    # input dim (morpheme embedding dimension): 300/4, output dimension: 300
-    fwdLSTM = dy.LSTMBuilder(1, int(dim/4), 300, model)
-    bwdLSTM = dy.LSTMBuilder(1, int(dim/4), 300, model)
+    # input dim (morpheme embedding dimension): 200/4, output dimension: 300
+    fwdLSTM = dy.LSTMBuilder(1, int(dim/4), 200, model)
+    bwdLSTM = dy.LSTMBuilder(1, int(dim/4), 200, model)
 
     # in order to reduce the segmentation dimension to half.
-    hidden_layer = model.add_parameters((300, 600))
+    hidden_layer = model.add_parameters((200, 400))
 
     # attention parameters: w-> for the hidden layer, v-> for the output layer
-    attention_w = model.add_parameters((300, 300))
-    attention_v = model.add_parameters((1, 300))
-    trainer = dy.SimpleSGDTrainer(model)
+    attention_w = model.add_parameters((200, 200))
+    attention_v = model.add_parameters((1, 200))
+    #trainer = dy.SimpleSGDTrainer(model)
+    trainer = dy.AdamTrainer(model,0.001, 0.9, 0.999, 1e-8 )
+    #trainer.set_sparse_updates(0)   # sparse updates off
 
     #build the LSTM for all segmentations of a single word
     def build_segmentation_graph(word_index, fwdLSTM, bwdLSTM):
@@ -158,6 +158,7 @@ def main():
                 state_b = state_b.add_input(morph_rep(seg[len(seg)-s-1]))
 
             segmentation_outputs_f.append(state_f.output())
+            #print(state_f.output().vec_value())
             segmentation_outputs_b.append(state_b.output())
         bi = [dy.concatenate([f,b]) for f, b in zip(segmentation_outputs_f, segmentation_outputs_b)]
         return bi
@@ -173,10 +174,13 @@ def main():
         att_weights = dy.softmax(dy.concatenate(unnormalized))
         return att_weights
 
-    for ITER in range(50):
+    print("Start training...")
+    total_loss = 0.0
+    for ITER in range(20):
+        print(ITER)
         for word, segmentations in word2sgmt.items():
             word_index = word_indices[word]
-            print(word)
+            #print(word)
 
             # generate the representations for each segmentation
             segmentation_outputs = build_segmentation_graph(word_index, fwdLSTM, bwdLSTM)
@@ -193,18 +197,24 @@ def main():
             weighted_sum=dy.cmult(att_weights[0], segmentation_outputs[0])
             for i in range(1, number_of_segmentation):
                 weighted_sum += dy.cmult(att_weights[i], segmentation_outputs[i])
-
+            #print(att_weights.vec_value())
             # compute cosine proximity loss and backpropagate
             y_word_vec = y_train[vocab[word]]
-            y = dy.vecInput(300)
+            y = dy.vecInput(200)
             y.set(y_word_vec)
-            loss = dy.cdiv(dy.dot_product(weighted_sum, y), (dy.squared_norm(weighted_sum)*dy.squared_norm(y)))
+            loss = dy.cdiv(dy.dot_product(weighted_sum, y), (dy.l2_norm(weighted_sum)*dy.l2_norm(y)))
+            #loss = loss + np.linalg.norm(morph_embeddings)
+
+            #loss = loss + norm
             loss.backward()
             trainer.update()
-            dy.renew_cg()  # build a new LSTM for each word
+            #dy.renew_cg(immediate_compute = True, check_validity = True)  # build a new LSTM for each word
+            dy.renew_cg()
 
+    model.save("morph-vectors", [morph_embeddings])
 if __name__ == '__main__': main()
 
 
 ### To do:
-# 1. Add l2 regularization
+# 1. Add l2 regularization (or add noise to the lookup parameters)
+# 2. Shuffle the dataset
