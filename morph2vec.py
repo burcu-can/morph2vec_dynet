@@ -10,6 +10,7 @@ import numpy as np
 from numpy.linalg import norm
 import argparse
 import dynet_config
+import random
 
 
 def main():
@@ -66,6 +67,15 @@ def main():
 
     print('number of morphemes: ', len(morphs))
     print('number of unique morphemes: ', len(set(morphs)))
+
+    def save_morpheme_dictionary():
+        fout = "morphem-indices.txt"
+        fo = open(fout, "w")
+        for k, v in morph_indices.items():
+            fo.write(str(k) + ':' + str(v) + '\n')
+        fo.close()
+
+    save_morpheme_dictionary()
 
     x_train = [[] for i in range(number_of_segmentation)]
 
@@ -175,10 +185,12 @@ def main():
         return att_weights
 
     print("Start training...")
-    total_loss = 0.0
     for ITER in range(20):
+        unique_words = list(word2sgmt.keys())
+        random.shuffle(unique_words)
+        #for word in word2sgmt.items():
         print(ITER)
-        for word, segmentations in word2sgmt.items():
+        for word in unique_words:
             word_index = word_indices[word]
             #print(word)
 
@@ -198,23 +210,22 @@ def main():
             for i in range(1, number_of_segmentation):
                 weighted_sum += dy.cmult(att_weights[i], segmentation_outputs[i])
             #print(att_weights.vec_value())
+
             # compute cosine proximity loss and backpropagate
             y_word_vec = y_train[vocab[word]]
             y = dy.vecInput(200)
             y.set(y_word_vec)
             loss = dy.cdiv(dy.dot_product(weighted_sum, y), (dy.l2_norm(weighted_sum)*dy.l2_norm(y)))
             #loss = loss + np.linalg.norm(morph_embeddings)
-
-            #loss = loss + norm
             loss.backward()
             trainer.update()
             #dy.renew_cg(immediate_compute = True, check_validity = True)  # build a new LSTM for each word
             dy.renew_cg()
 
-    model.save("morph-vectors", [morph_embeddings])
+    #model.save("morph-vectors", [morph_embeddings])
+    model.save("saved-model")
 if __name__ == '__main__': main()
 
 
 ### To do:
 # 1. Add l2 regularization (or add noise to the lookup parameters)
-# 2. Shuffle the dataset
