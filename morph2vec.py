@@ -3,7 +3,6 @@ from __future__ import unicode_literals
 
 import codecs
 import sys
-
 import dynet_config
 import dynet as dy
 import numpy as np
@@ -19,14 +18,12 @@ def main():
     parser.add_argument('--input', type=str, required=True, help = "path to training file")
     parser.add_argument('--wordVector', type=str, required=True, help = "path to word2vec vector file")
     parser.add_argument('--output', '-o', type=str, required=True, help = "output directory where the weight file will be saved")
-    parser.add_argument('--segNo', type=int, default=10, help = "number of segmentations provided for a given word during training")
     parser.add_argument('--batch', type=int, default=32,help = "batch size")
     parser.add_argument('--epoch', type=int, default=5,help = "number of epochs")
     parser.add_argument('--dim', type=int, default=200, help="dimension")
 
     args = parser.parse_args()
 
-    number_of_segmentation = args.segNo
     gensim_model = args.wordVector
     training_file = args.input
     output_file =args.output
@@ -37,33 +34,32 @@ def main():
     print('')
 
     word2sgmt = {}
-    word2segmentations = {}
     seq = []
     morphs = []
+    word_indices = {}
+    indices_word = {}
 
     f = codecs.open(training_file, encoding='utf-8')
+    index = 0
     for line in f:
         line = line.rstrip('\n')
         word, sgmnts = line.split(':')
         sgmt = sgmnts.split('+')
-        word2segmentations[word] = list(s for s in sgmt)
-        sgmt = list(s.split('-') for s in sgmt)
+        sgmt = list(s.split('-') for s in sgmt if len(s)>0 and s!="###")
+        word_indices[word] = index
+        indices_word[index] = word
         word2sgmt[word] = sgmt
         seq.extend(sgmt)
-
-   # timesteps_max_len = 0
+        index = index + 1
 
     for sgmt in seq:
-        #if len(sgmt) > timesteps_max_len: timesteps_max_len = len(sgmt)
         for morph in sgmt:
             morphs.append(morph)
 
     print('number of words: ', len(word2sgmt))
 
-    morph_indices = dict((c, i + 1) for i, c in enumerate(set(morphs)))
-    morph_indices['###'] = 0
-
-    indices_morph = dict((i+1, c) for i, c in enumerate(set(morphs)))
+    morph_indices = dict((c, i) for i, c in enumerate(set(morphs)))
+    indices_morph = dict((i, c) for i, c in enumerate(set(morphs)))
 
     print('number of morphemes: ', len(morphs))
     print('number of unique morphemes: ', len(set(morphs)))
@@ -77,18 +73,9 @@ def main():
 
     save_morpheme_dictionary()
 
-    x_train = [[] for i in range(number_of_segmentation)]
-
-    word_indices = {}
-    index = 0
     for word in word2sgmt:
-        word_indices[word] = index
         for i in range(len(word2sgmt[word])):
-            x_train[i].append([morph_indices[c] for c in word2sgmt[word][i]])
-        index = index+1
-
-    for i in range(number_of_segmentation):
-        x_train[i] = np.array(x_train[i])
+            word2sgmt[word][i] = [morph_indices[c] for c in word2sgmt[word][i]]
 
     print('')
     print('==========================  Load pre-trained word vectors...  ======================================')
@@ -106,24 +93,13 @@ def main():
 
 #    print('number of pre-trained vectors: ', len(w2v_model.vocab))
 
-    print('number of pre-trained vectors: ', len(vocab)) # 've':1, 'kitap':2
     print('number of words found: ', len(y_train)) # [[f1,f2,....,f200],[f1,f2,....,f200],.....]
     y_train = np.array(y_train)
     print('shape of Y: ', y_train.shape)
 
     print('')
-    print('===================================  Save Input and Output...  ===============================================')
-    print('')
-
-    np.save("x_train", x_train)
-    np.save("y_train", y_train)
-
-    print('')
     print('===================================  Build model...  ===============================================')
     print('')
-
-    #dynet_config.set(weight_decay=0.001)
-    #dynet_config.set(autobatch=10)
 
     model = dy.Model()
     parameters = dy.ParameterCollection()
@@ -131,25 +107,24 @@ def main():
     morph_embeddings = model.add_lookup_parameters((len(set(morphs))+1, int(dim/4))) # randomly initialized
 
     def morph_rep(m): # returns the embedding of morpheme 'm' (m: morpheme index)
-        #m_index = morph_indices[m]
         return morph_embeddings[m]
 
     # input dim (morpheme embedding dimension): 200/4, output dimension: 300
-    fwdLSTM = dy.LSTMBuilder(1, int(dim/4), 200, model)
-    bwdLSTM = dy.LSTMBuilder(1, int(dim/4), 200, model)
+    fwdLSTM = dy.LSTMBuilder(1, int(dim/4), dim, model)
+    bwdLSTM = dy.LSTMBuilder(1, int(dim/4), dim, model)
 
     # in order to reduce the segmentation dimension to half.
-    hidden_layer = model.add_parameters((200, 400))
+    hidden_layer = model.add_parameters((dim, 2*dim))
 
     # attention parameters: w-> for the hidden layer, v-> for the output layer
-    attention_w = model.add_parameters((200, 200))
-    attention_v = model.add_parameters((1, 200))
-    #trainer = dy.SimpleSGDTrainer(model)
-    trainer = dy.AdamTrainer(model,0.001, 0.9, 0.999, 1e-8 )
-    #trainer.set_sparse_updates(0)   # sparse updates off
+    attention_w = model.add_parameters((dim, dim))
+    attention_v = model.add_parameters((1, dim))
+    trainer = dy.AdamTrainer(model)
+    trainer.set_sparse_updates(False)   # sparse updates off
 
     #build the LSTM for all segmentations of a single word
-    def build_segmentation_graph(word_index, fwdLSTM, bwdLSTM):
+    def build_segmentation_graph(word, fwdLSTM, bwdLSTM):
+        word_segs = word2sgmt[word]
         # iterate for each segmentation
         segmentation_outputs_f = []
         segmentation_outputs_b = []
@@ -157,9 +132,9 @@ def main():
         f_init = fwdLSTM.initial_state()
         b_init = bwdLSTM.initial_state()
 
-        for i in range(number_of_segmentation):
+        for i in range(len(word_segs)):
 
-            seg = x_train[i][word_index]
+            seg = word_segs[i]
             # for each unit (i.e. segment) in the LSTM forward computation
             state_f = f_init
             state_b = b_init
@@ -184,18 +159,37 @@ def main():
         att_weights = dy.softmax(dy.concatenate(unnormalized))
         return att_weights
 
+    def pick_cos_prox(pred, gold):
+
+        def l2_normalize(x):
+            epsilon = np.finfo(float).eps * dy.ones(pred.dim()[0])
+            norm = dy.sqrt(dy.sum_elems(dy.square(x)))
+            sign = dy.cdiv(x, dy.bmax(dy.abs(x), epsilon))
+            return dy.cdiv(dy.cmult(sign, dy.bmax(dy.abs(x), epsilon)), dy.bmax(norm, epsilon[0]))
+
+        y_true = l2_normalize(pred)
+        y_pred = l2_normalize(gold)
+
+        return dy.mean_elems(dy.cmult(y_true, y_pred))
+
+    def cosine_proximity(pred, gold):
+
+        def l2_normalize(x):
+            square_sum = dy.sqrt(dy.bmax(dy.sum_elems(dy.square(x)), np.finfo(float).eps * dy.ones((1))[0]))
+            return dy.cdiv(x, square_sum)
+
+        y_true = l2_normalize(pred)
+        y_pred = l2_normalize(gold)
+        return -dy.sum_elems(dy.cmult(y_true, y_pred))
+
     print("Start training...")
-    for ITER in range(20):
+    for ITER in range(number_of_epoch):
         unique_words = list(word2sgmt.keys())
         random.shuffle(unique_words)
-        #for word in word2sgmt.items():
         print(ITER)
         for word in unique_words:
-            word_index = word_indices[word]
-            #print(word)
-
             # generate the representations for each segmentation
-            segmentation_outputs = build_segmentation_graph(word_index, fwdLSTM, bwdLSTM)
+            segmentation_outputs = build_segmentation_graph(word, fwdLSTM, bwdLSTM)
 
             H = dy.parameter(hidden_layer)
             # reduce each segmentation representation to its half.
@@ -207,22 +201,18 @@ def main():
 
             # compute weighted sum
             weighted_sum=dy.cmult(att_weights[0], segmentation_outputs[0])
-            for i in range(1, number_of_segmentation):
+            for i in range(1, len(segmentation_outputs)):
                 weighted_sum += dy.cmult(att_weights[i], segmentation_outputs[i])
-            #print(att_weights.vec_value())
 
             # compute cosine proximity loss and backpropagate
             y_word_vec = y_train[vocab[word]]
             y = dy.vecInput(200)
             y.set(y_word_vec)
-            loss = dy.cdiv(dy.dot_product(weighted_sum, y), (dy.l2_norm(weighted_sum)*dy.l2_norm(y)))
-            #loss = loss + np.linalg.norm(morph_embeddings)
+            loss = cosine_proximity(weighted_sum, y)
             loss.backward()
             trainer.update()
-            #dy.renew_cg(immediate_compute = True, check_validity = True)  # build a new LSTM for each word
             dy.renew_cg()
 
-    #model.save("morph-vectors", [morph_embeddings])
     model.save("saved-model")
 if __name__ == '__main__': main()
 
