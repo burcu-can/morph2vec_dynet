@@ -180,7 +180,7 @@ def main():
 
         y_true = l2_normalize(pred)
         y_pred = l2_normalize(gold)
-        return -dy.sum_elems(dy.cmult(y_true, y_pred))
+        return -dy.sum_elems(dy.cmult(y_true, y_pred)) 
 
     print("Start training...")
     for ITER in range(number_of_epoch):
